@@ -1,1 +1,605 @@
 
+name: Build TurboIPTV APK
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Generate TurboIPTV Android Project
+        run: |
+          mkdir -p app/src/main/java/com/turboiptv/player
+
+          cat << 'EOF' > settings.gradle.kts
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = "TurboIPTV"
+          include(":app")
+          EOF
+
+          cat << 'EOF' > build.gradle.kts
+          plugins {
+              id("com.android.application") version "8.7.3" apply false
+              id("org.jetbrains.kotlin.android") version "2.0.21" apply false
+          }
+          EOF
+
+          cat << 'EOF' > gradle.properties
+          org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8
+          android.useAndroidX=true
+          EOF
+
+          cat << 'EOF' > app/build.gradle.kts
+          plugins {
+              id("com.android.application")
+              id("org.jetbrains.kotlin.android")
+          }
+          android {
+              namespace = "com.turboiptv.player"
+              compileSdk = 35
+              defaultConfig {
+                  applicationId = "com.turboiptv.player"
+                  minSdk = 24
+                  targetSdk = 35
+                  versionCode = 1
+                  versionName = "1.0.0"
+              }
+              compileOptions {
+                  sourceCompatibility = JavaVersion.VERSION_17
+                  targetCompatibility = JavaVersion.VERSION_17
+              }
+              kotlinOptions { jvmTarget = "17" }
+          }
+          dependencies {
+              val media3 = "1.11.1"
+              implementation("androidx.appcompat:appcompat:1.7.0")
+              implementation("androidx.media3:media3-exoplayer:$media3")
+              implementation("androidx.media3:media3-exoplayer-hls:$media3")
+              implementation("androidx.media3:media3-exoplayer-dash:$media3")
+              implementation("androidx.media3:media3-ui:$media3")
+              implementation("androidx.media3:media3-common:$media3")
+          }
+          EOF
+
+          cat << 'EOF' > app/src/main/AndroidManifest.xml
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-permission android:name="android.permission.INTERNET" />
+              <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+              <application
+                  android:label="TurboIPTV"
+                  android:theme="@style/Theme.AppCompat.NoActionBar"
+                  android:usesCleartextTraffic="true">
+                  <activity
+                      android:name=".MainActivity"
+                      android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|smallestScreenSize"
+                      android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          EOF
+
+          cat << 'EOF' > app/src/main/java/com/turboiptv/player/MainActivity.kt
+          package com.turboiptv.player
+
+          import android.content.pm.ActivityInfo
+          import android.graphics.Color
+          import android.os.Bundle
+          import android.text.Editable
+          import android.text.TextWatcher
+          import android.view.Gravity
+          import android.view.View
+          import android.view.ViewGroup
+          import android.widget.ArrayAdapter
+          import android.widget.Button
+          import android.widget.EditText
+          import android.widget.FrameLayout
+          import android.widget.LinearLayout
+          import android.widget.ListView
+          import android.widget.TextView
+          import android.widget.Toast
+          import androidx.activity.result.contract.ActivityResultContracts
+          import androidx.annotation.OptIn
+          import androidx.appcompat.app.AlertDialog
+          import androidx.appcompat.app.AppCompatActivity
+          import androidx.media3.common.C
+          import androidx.media3.common.MediaItem
+          import androidx.media3.common.PlaybackException
+          import androidx.media3.common.Player
+          import androidx.media3.common.TrackSelectionOverride
+          import androidx.media3.common.Tracks
+          import androidx.media3.common.VideoSize
+          import androidx.media3.common.util.UnstableApi
+          import androidx.media3.exoplayer.DefaultLoadControl
+          import androidx.media3.exoplayer.ExoPlayer
+          import androidx.media3.exoplayer.trackselection.DefaultTrackSelector
+          import androidx.media3.ui.PlayerView
+          import org.json.JSONArray
+          import org.json.JSONObject
+          import java.net.HttpURLConnection
+          import java.net.URL
+          import java.util.concurrent.Executors
+
+          data class Channel(val id: String, val name: String, val group: String, val url: String, val custom: Boolean = false)
+
+          @OptIn(UnstableApi::class)
+          class MainActivity : AppCompatActivity() {
+
+              enum class SpeedPreset(val label: String, val minBuf: Int, val maxBuf: Int, val playMs: Int, val rebufMs: Int) {
+                  ULTRA("Siêu tốc", 1500, 6000, 500, 1000),
+                  BALANCED("Cân bằng", 5000, 20000, 1500, 3000),
+                  STABLE("Ổn định", 15000, 50000, 2500, 5000)
+              }
+
+              private lateinit var playerView: PlayerView
+              private lateinit var playerContainer: FrameLayout
+              private lateinit var topBar: LinearLayout
+              private lateinit var bottomArea: LinearLayout
+              private lateinit var tvNowPlaying: TextView
+              private lateinit var tvStats: TextView
+              private lateinit var btnSpeed: Button
+              private lateinit var btnRes: Button
+              private lateinit var btnAdd: Button
+              private lateinit var btnFull: Button
+              private lateinit var etSearch: EditText
+              private lateinit var listView: ListView
+
+              private var player: ExoPlayer? = null
+              private var selector: DefaultTrackSelector? = null
+              private var preset = SpeedPreset.ULTRA
+              private var activeChannel: Channel? = null
+              private var isFull = false
+              private var addDialog: AlertDialog? = null
+
+              private val allChannels = mutableListOf<Channel>()
+              private val shownChannels = mutableListOf<Channel>()
+              private lateinit var listAdapter: ArrayAdapter<String>
+              private val io = Executors.newSingleThreadExecutor()
+              private val prefs by lazy { getSharedPreferences("turbo_iptv", MODE_PRIVATE) }
+
+              private val filePicker = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+                  if (uri == null) return@registerForActivityResult
+                  try {
+                      val txt = contentResolver.openInputStream(uri)?.bufferedReader()?.use { it.readText() }.orEmpty()
+                      val parsed = parseM3u(txt, "File M3U")
+                      if (parsed.isNotEmpty()) {
+                          addChannels(parsed)
+                          addDialog?.dismiss()
+                      } else {
+                          toast("Không tìm thấy kênh hợp lệ trong file")
+                      }
+                  } catch (e: Exception) {
+                      toast("Lỗi đọc file: ${e.localizedMessage}")
+                  }
+              }
+
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  buildUi()
+                  loadChannels()
+                  initPlayer()
+                  if (allChannels.isNotEmpty()) playChannel(allChannels.first())
+              }
+
+              private fun dp(v: Int): Int = (v * resources.displayMetrics.density).toInt()
+
+              private fun buildUi() {
+                  val root = LinearLayout(this).apply {
+                      orientation = LinearLayout.VERTICAL
+                      setBackgroundColor(Color.parseColor("#070B14"))
+                  }
+
+                  topBar = LinearLayout(this).apply {
+                      orientation = LinearLayout.HORIZONTAL
+                      gravity = Gravity.CENTER_VERTICAL
+                      setBackgroundColor(Color.parseColor("#0F172A"))
+                      setPadding(dp(10), dp(6), dp(10), dp(6))
+                  }
+                  val title = TextView(this).apply {
+                      text = "TurboIPTV"
+                      setTextColor(Color.WHITE)
+                      textSize = 16f
+                      layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+                  }
+                  btnSpeed = makeBtn(preset.label, "#1E293B", Color.parseColor("#22D3EE")) { showSpeedDialog() }
+                  btnRes = makeBtn("Auto", "#1E293B", Color.WHITE) { showResolutionDialog() }
+                  btnAdd = makeBtn("+ Link", "#06B6D4", Color.parseColor("#070B14")) { showAddLinkDialog() }
+                  topBar.addView(title)
+                  topBar.addView(btnSpeed)
+                  topBar.addView(btnRes)
+                  topBar.addView(btnAdd)
+
+                  playerContainer = FrameLayout(this).apply {
+                      setBackgroundColor(Color.BLACK)
+                      layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(235))
+                  }
+                  playerView = PlayerView(this).apply {
+                      useController = true
+                      setShowBuffering(PlayerView.SHOW_BUFFERING_WHEN_PLAYING)
+                      layoutParams = FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
+                  }
+                  tvStats = TextView(this).apply {
+                      text = "Sẵn sàng"
+                      textSize = 11f
+                      setTextColor(Color.parseColor("#22D3EE"))
+                      setBackgroundColor(Color.parseColor("#99000000"))
+                      setPadding(dp(8), dp(4), dp(8), dp(4))
+                      layoutParams = FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.TOP or Gravity.START).apply {
+                          setMargins(dp(8), dp(8), 0, 0)
+                      }
+                  }
+                  btnFull = makeBtn("Full", "#99000000", Color.WHITE) { toggleFullscreen() }.apply {
+                      layoutParams = FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(34), Gravity.TOP or Gravity.END).apply {
+                          setMargins(0, dp(8), dp(8), 0)
+                      }
+                  }
+                  playerContainer.addView(playerView)
+                  playerContainer.addView(tvStats)
+                  playerContainer.addView(btnFull)
+
+                  bottomArea = LinearLayout(this).apply {
+                      orientation = LinearLayout.VERTICAL
+                      layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f)
+                  }
+                  tvNowPlaying = TextView(this).apply {
+                      text = "Chọn kênh hoặc nhấn + Link để thêm"
+                      setTextColor(Color.WHITE)
+                      textSize = 14f
+                      setPadding(dp(12), dp(10), dp(12), dp(6))
+                      setBackgroundColor(Color.parseColor("#0F172A"))
+                  }
+                  etSearch = EditText(this).apply {
+                      hint = "Tìm kênh trong danh sách..."
+                      setTextColor(Color.WHITE)
+                      setHintTextColor(Color.parseColor("#94A3B8"))
+                      setBackgroundColor(Color.parseColor("#162036"))
+                      setPadding(dp(12), dp(8), dp(12), dp(8))
+                      textSize = 13f
+                  }
+                  etSearch.addTextChangedListener(object : TextWatcher {
+                      override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+                      override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) { filter(s?.toString().orEmpty()) }
+                      override fun afterTextChanged(s: Editable?) {}
+                  })
+
+                  listView = ListView(this).apply {
+                      setBackgroundColor(Color.parseColor("#070B14"))
+                      layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f)
+                  }
+                  listAdapter = ArrayAdapter(this, android.R.layout.simple_list_item_1, mutableListOf())
+                  listView.adapter = listAdapter
+                  listView.setOnItemClickListener { _, _, pos, _ ->
+                      shownChannels.getOrNull(pos)?.let { playChannel(it) }
+                  }
+                  listView.setOnItemLongClickListener { _, _, pos, _ ->
+                      val ch = shownChannels.getOrNull(pos) ?: return@setOnItemLongClickListener true
+                      AlertDialog.Builder(this)
+                          .setTitle(ch.name)
+                          .setMessage("Xóa kênh này khỏi danh sách?")
+                          .setPositiveButton("Xóa") { _, _ ->
+                              allChannels.removeAll { it.id == ch.id }
+                              saveChannels()
+                              filter(etSearch.text.toString())
+                          }
+                          .setNegativeButton("Hủy", null)
+                          .show()
+                      true
+                  }
+
+                  bottomArea.addView(tvNowPlaying)
+                  bottomArea.addView(etSearch)
+                  bottomArea.addView(listView)
+
+                  root.addView(topBar)
+                  root.addView(playerContainer)
+                  root.addView(bottomArea)
+                  setContentView(root)
+              }
+
+              private fun makeBtn(label: String, bgHex: String, fgColor: Int, onClick: () -> Unit): Button =
+                  Button(this).apply {
+                      text = label
+                      textSize = 12f
+                      isAllCaps = false
+                      setTextColor(fgColor)
+                      setBackgroundColor(Color.parseColor(bgHex))
+                      setPadding(dp(10), dp(4), dp(10), dp(4))
+                      layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(36)).apply {
+                          marginStart = dp(6)
+                      }
+                      setOnClickListener { onClick() }
+                  }
+
+              private fun defaults() = listOf(
+                  Channel("d1", "iReplay 24/7 Cinema Live", "Trực tiếp", "https://ireplay.tv/test/blender.m3u8"),
+                  Channel("d2", "Akamai Live 24/7", "Trực tiếp", "https://cph-p2p-msl.akamaized.net/hls/live/2000341/test/master.m3u8"),
+                  Channel("d3", "Big Buck Bunny HD (Mux ABR)", "Demo ABR", "https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8"),
+                  Channel("d4", "Sintel Full HD (Akamai ABR)", "Demo ABR", "https://bitdash-a.akamaihd.net/content/sintel/hls/playlist.m3u8"),
+                  Channel("d5", "Tears of Steel (Unified ABR)", "Demo ABR", "https://demo.unified-streaming.com/k8s/features/stable/video/tears-of-steel/tears-of-steel.ism/.m3u8"),
+                  Channel("d6", "Apple fMP4 Multi-Track", "Test", "https://devstreaming-cdn.apple.com/videos/streaming/examples/img_bipbop_adv_example_fmp4/master.m3u8")
+              )
+
+              private fun loadChannels() {
+                  allChannels.clear()
+                  val raw = prefs.getString("channels", null)
+                  if (!raw.isNullOrBlank()) {
+                      try {
+                          val arr = JSONArray(raw)
+                          for (i in 0 until arr.length()) {
+                              val o = arr.getJSONObject(i)
+                              allChannels.add(Channel(o.getString("id"), o.getString("name"), o.optString("group", "Chung"), o.getString("url"), o.optBoolean("custom", false)))
+                          }
+                      } catch (_: Exception) {}
+                  }
+                  if (allChannels.isEmpty()) allChannels.addAll(defaults())
+                  filter("")
+              }
+
+              private fun saveChannels() {
+                  val arr = JSONArray()
+                  allChannels.forEach { c ->
+                      arr.put(JSONObject().put("id", c.id).put("name", c.name).put("group", c.group).put("url", c.url).put("custom", c.custom))
+                  }
+                  prefs.edit().putString("channels", arr.toString()).apply()
+              }
+
+              private fun filter(q: String) {
+                  val s = q.trim().lowercase()
+                  shownChannels.clear()
+                  shownChannels.addAll(if (s.isEmpty()) allChannels else allChannels.filter { it.name.lowercase().contains(s) || it.group.lowercase().contains(s) })
+                  listAdapter.clear()
+                  listAdapter.addAll(shownChannels.map {
+                      val mark = if (it.id == activeChannel?.id) "▶ " else ""
+                      "$mark${it.name}  [${it.group}]"
+                  })
+                  listAdapter.notifyDataSetChanged()
+              }
+
+              private fun initPlayer() {
+                  player?.release()
+                  val ts = DefaultTrackSelector(this).apply {
+                      setParameters(buildUponParameters().setAllowVideoMixedMimeTypeSupport(true))
+                  }
+                  selector = ts
+                  val lc = DefaultLoadControl.Builder()
+                      .setBufferDurationsMs(preset.minBuf, preset.maxBuf, preset.playMs, preset.rebufMs)
+                      .setPrioritizeTimeOverSizeThresholds(true)
+                      .build()
+                  val exo = ExoPlayer.Builder(this).setTrackSelector(ts).setLoadControl(lc).build()
+                  exo.addListener(object : Player.Listener {
+                      override fun onVideoSizeChanged(size: VideoSize) {
+                          if (size.height > 0) tvStats.text = "${size.width}x${size.height} • ${preset.label}"
+                      }
+                      override fun onTracksChanged(tracks: Tracks) {
+                          for (g in tracks.groups) {
+                              if (g.type == C.TRACK_TYPE_VIDEO && g.isSelected) {
+                                  for (i in 0 until g.length) if (g.isTrackSelected(i)) {
+                                      val h = g.getTrackFormat(i).height
+                                      if (h > 0) btnRes.text = "${h}p"
+                                  }
+                              }
+                          }
+                      }
+                      override fun onPlayerError(error: PlaybackException) {
+                          tvStats.text = "Lỗi: ${error.errorCodeName}"
+                          toast("Không mở được luồng (${error.errorCodeName})")
+                      }
+                  })
+                  player = exo
+                  playerView.player = exo
+                  btnSpeed.text = preset.label
+              }
+
+              private fun playChannel(ch: Channel) {
+                  activeChannel = ch
+                  tvNowPlaying.text = "${ch.name} • ${ch.group}"
+                  tvStats.text = "Đang tải (${preset.label})..."
+                  btnRes.text = "Auto"
+                  val exo = player ?: run { initPlayer(); player!! }
+                  selector?.let { it.setParameters(it.buildUponParameters().clearOverridesOfType(C.TRACK_TYPE_VIDEO)) }
+                  exo.setMediaItem(MediaItem.fromUri(ch.url))
+                  exo.prepare()
+                  exo.playWhenReady = true
+                  filter(etSearch.text.toString())
+              }
+
+              private fun showSpeedDialog() {
+                  val items = SpeedPreset.values()
+                  val labels = items.map { "${it.label} (Buffer ${it.minBuf / 1000.0}s - ${it.maxBuf / 1000}s)" }.toTypedArray()
+                  AlertDialog.Builder(this)
+                      .setTitle("Tốc độ tải (Buffer)")
+                      .setSingleChoiceItems(labels, items.indexOf(preset)) { d, w ->
+                          preset = items[w]
+                          initPlayer()
+                          activeChannel?.let { playChannel(it) }
+                          d.dismiss()
+                      }
+                      .setNegativeButton("Đóng", null)
+                      .show()
+              }
+
+              private fun showResolutionDialog() {
+                  val exo = player ?: return
+                  val ts = selector ?: return
+                  data class Opt(val label: String, val grp: Tracks.Group?, val idx: Int, val cap: Int = Int.MAX_VALUE)
+                  val opts = mutableListOf(
+                      Opt("Tự động (ABR)", null, -1),
+                      Opt("Auto giới hạn <= 720p", null, -1, 720),
+                      Opt("Auto giới hạn <= 480p", null, -1, 480)
+                  )
+                  for (g in exo.currentTracks.groups) {
+                      if (g.type == C.TRACK_TYPE_VIDEO) {
+                          for (i in 0 until g.length) if (g.isTrackSupported(i)) {
+                              val f = g.getTrackFormat(i)
+                              val mbps = if (f.bitrate > 0) String.format("%.2f Mbps", f.bitrate / 1e6) else "ABR"
+                              opts.add(Opt("${f.height}p (${f.width}x${f.height} • $mbps)", g, i))
+                          }
+                      }
+                  }
+                  AlertDialog.Builder(this)
+                      .setTitle("Chọn độ phân giải video")
+                      .setItems(opts.map { it.label }.toTypedArray()) { d, w ->
+                          val o = opts[w]
+                          val b = ts.buildUponParameters().clearOverridesOfType(C.TRACK_TYPE_VIDEO).setMaxVideoSize(Int.MAX_VALUE, o.cap)
+                          if (o.grp != null) {
+                              b.addOverride(TrackSelectionOverride(o.grp.mediaTrackGroup, listOf(o.idx)))
+                              btnRes.text = "${o.grp.getTrackFormat(o.idx).height}p"
+                          } else {
+                              btnRes.text = if (o.cap < Int.MAX_VALUE) "<=${o.cap}p" else "Auto"
+                          }
+                          ts.setParameters(b)
+                          d.dismiss()
+                      }
+                      .setNegativeButton("Đóng", null)
+                      .show()
+              }
+
+              private fun showAddLinkDialog() {
+                  val box = LinearLayout(this).apply {
+                      orientation = LinearLayout.VERTICAL
+                      setPadding(dp(18), dp(12), dp(18), dp(8))
+                  }
+                  val etUrl = EditText(this).apply { hint = "https://.../live.m3u8 hoặc playlist.m3u" }
+                  val etName = EditText(this).apply { hint = "Tên kênh (tùy chọn)" }
+                  val etGroup = EditText(this).apply { hint = "Nhóm kênh"; setText("Kênh tùy chỉnh") }
+                  val btnFile = Button(this).apply {
+                      text = "Chọn file .M3U / .M3U8 từ máy"
+                      setOnClickListener { filePicker.launch(arrayOf("*/*")) }
+                  }
+                  box.addView(etUrl); box.addView(etName); box.addView(etGroup); box.addView(btnFile)
+
+                  val dlg = AlertDialog.Builder(this)
+                      .setTitle("Thêm link IPTV tùy chỉnh")
+                      .setView(box)
+                      .setPositiveButton("Thêm & Phát", null)
+                      .setNegativeButton("Hủy", null)
+                      .create()
+
+                  dlg.setOnShowListener {
+                      dlg.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+                          val url = etUrl.text.toString().trim()
+                          val name = etName.text.toString().trim()
+                          val grp = etGroup.text.toString().trim().ifEmpty { "Kênh tùy chỉnh" }
+                          if (!url.startsWith("http://", true) && !url.startsWith("https://", true) && !url.startsWith("rtsp://", true)) {
+                              toast("Link phải bắt đầu bằng http://, https:// hoặc rtsp://")
+                              return@setOnClickListener
+                          }
+                          if (url.endsWith(".m3u", true)) {
+                              toast("Đang tải danh sách .M3U...")
+                              io.execute {
+                                  try {
+                                      val conn = URL(url).openConnection() as HttpURLConnection
+                                      conn.connectTimeout = 8000; conn.readTimeout = 8000
+                                      val txt = conn.inputStream.bufferedReader().use { r -> r.readText() }
+                                      val parsed = parseM3u(txt, grp)
+                                      runOnUiThread {
+                                          if (parsed.isNotEmpty()) { addChannels(parsed); dlg.dismiss() }
+                                          else toast("Không tìm thấy kênh trong file .M3U")
+                                      }
+                                  } catch (e: Exception) {
+                                      runOnUiThread { toast("Lỗi tải M3U: ${e.localizedMessage}") }
+                                  }
+                              }
+                          } else {
+                              val ch = Channel("c_${System.currentTimeMillis()}", name.ifEmpty { url.substringAfterLast('/').substringBefore('?').ifEmpty { "Kênh tùy chỉnh" } }, grp, url, true)
+                              addChannels(listOf(ch))
+                              dlg.dismiss()
+                          }
+                      }
+                  }
+                  addDialog = dlg
+                  dlg.show()
+              }
+
+              private fun parseM3u(content: String, fallbackGroup: String): List<Channel> {
+                  val out = mutableListOf<Channel>()
+                  val grpRx = Regex("group-title=\\"([^\\"]*)\\"", RegexOption.IGNORE_CASE)
+                  var pName: String? = null
+                  var pGrp = fallbackGroup
+                  for (raw in content.lines()) {
+                      val line = raw.trim()
+                      if (line.isEmpty()) continue
+                      if (line.startsWith("#EXTINF", true)) {
+                          pGrp = grpRx.find(line)?.groupValues?.getOrNull(1)?.trim().orEmpty().ifEmpty { fallbackGroup }
+                          val idx = line.lastIndexOf(',')
+                          pName = if (idx != -1) line.substring(idx + 1).trim() else "Kênh IPTV"
+                      } else if (!line.startsWith("#") && (line.startsWith("http://", true) || line.startsWith("https://", true) || line.startsWith("rtsp://", true))) {
+                          out.add(Channel("m_${System.currentTimeMillis()}_${out.size}", pName?.ifEmpty { "Kênh IPTV" } ?: "Kênh IPTV", pGrp, line, true))
+                          pName = null; pGrp = fallbackGroup
+                      }
+                  }
+                  return out
+              }
+
+              private fun addChannels(items: List<Channel>) {
+                  allChannels.addAll(0, items)
+                  saveChannels()
+                  filter(etSearch.text.toString())
+                  toast("Đã thêm ${items.size} kênh")
+                  items.firstOrNull()?.let { playChannel(it) }
+              }
+
+              private fun toggleFullscreen() {
+                  isFull = !isFull
+                  if (isFull) {
+                      requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+                      topBar.visibility = View.GONE
+                      bottomArea.visibility = View.GONE
+                      playerContainer.layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
+                      btnFull.text = "Thu nhỏ"
+                  } else {
+                      requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+                      topBar.visibility = View.VISIBLE
+                      bottomArea.visibility = View.VISIBLE
+                      playerContainer.layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(235))
+                      btnFull.text = "Full"
+                  }
+              }
+
+              private fun toast(msg: String) = Toast.makeText(this, msg, Toast.LENGTH_SHORT).show()
+              override fun onStop() { super.onStop(); player?.pause() }
+              override fun onDestroy() { super.onDestroy(); player?.release(); io.shutdown() }
+          }
+          EOF
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.9
+
+      - name: Build Debug APK
+        run: gradle assembleDebug --no-daemon
+
+      - name: Upload TurboIPTV APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: TurboIPTV-APK
+          path: app/build/outputs/apk/debug/app-debug.apk
