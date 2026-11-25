@@ -58,8 +58,8 @@ jobs:
                   applicationId = "com.turboiptv.player"
                   minSdk = 24
                   targetSdk = 35
-                  versionCode = 1
-                  versionName = "1.0.0"
+                  versionCode = 2
+                  versionName = "1.0.1"
               }
               compileOptions {
                   sourceCompatibility = JavaVersion.VERSION_17
@@ -91,7 +91,8 @@ jobs:
                   <activity
                       android:name=".MainActivity"
                       android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|smallestScreenSize"
-                      android:exported="true">
+                      android:exported="true"
+                      android:windowSoftInputMode="adjustResize">
                       <intent-filter>
                           <action android:name="android.intent.action.MAIN" />
                           <category android:name="android.intent.category.LAUNCHER" />
@@ -120,10 +121,14 @@ jobs:
           import android.widget.ListView
           import android.widget.TextView
           import android.widget.Toast
+          import androidx.activity.SystemBarStyle
+          import androidx.activity.enableEdgeToEdge
           import androidx.activity.result.contract.ActivityResultContracts
           import androidx.annotation.OptIn
           import androidx.appcompat.app.AlertDialog
           import androidx.appcompat.app.AppCompatActivity
+          import androidx.core.view.ViewCompat
+          import androidx.core.view.WindowInsetsCompat
           import androidx.media3.common.C
           import androidx.media3.common.MediaItem
           import androidx.media3.common.PlaybackException
@@ -198,6 +203,10 @@ jobs:
 
               override fun onCreate(savedInstanceState: Bundle?) {
                   super.onCreate(savedInstanceState)
+                  enableEdgeToEdge(
+                      statusBarStyle = SystemBarStyle.dark(Color.TRANSPARENT),
+                      navigationBarStyle = SystemBarStyle.dark(Color.TRANSPARENT)
+                  )
                   buildUi()
                   loadChannels()
                   initPlayer()
@@ -316,7 +325,17 @@ jobs:
                   root.addView(topBar)
                   root.addView(playerContainer)
                   root.addView(bottomArea)
+                  ViewCompat.setOnApplyWindowInsetsListener(root) { view, insets ->
+                      val safeArea = insets.getInsets(
+                          WindowInsetsCompat.Type.systemBars() or
+                              WindowInsetsCompat.Type.displayCutout() or
+                              WindowInsetsCompat.Type.ime()
+                      )
+                      view.setPadding(safeArea.left, safeArea.top, safeArea.right, safeArea.bottom)
+                      insets
+                  }
                   setContentView(root)
+                  ViewCompat.requestApplyInsets(root)
               }
 
               private fun makeBtn(label: String, bgHex: String, fgColor: Int, onClick: () -> Unit): Button =
