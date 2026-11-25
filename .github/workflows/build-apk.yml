@@ -381,7 +381,7 @@ jobs:
               private fun initPlayer() {
                   player?.release()
                   val ts = DefaultTrackSelector(this).apply {
-                      setParameters(buildUponParameters().setAllowVideoMixedMimeTypeSupport(true))
+                      setParameters(buildUponParameters().setAllowVideoMixedMimeTypeAdaptiveness(true))
                   }
                   selector = ts
                   val lc = DefaultLoadControl.Builder()
@@ -535,7 +535,7 @@ jobs:
 
               private fun parseM3u(content: String, fallbackGroup: String): List<Channel> {
                   val out = mutableListOf<Channel>()
-                  val grpRx = Regex("group-title=\\"([^\\"]*)\\"", RegexOption.IGNORE_CASE)
+                  val grpRx = Regex("group-title=\"([^\"]*)\"", RegexOption.IGNORE_CASE)
                   var pName: String? = null
                   var pGrp = fallbackGroup
                   for (raw in content.lines()) {
@@ -603,3 +603,4 @@ jobs:
         with:
           name: TurboIPTV-APK
           path: app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
