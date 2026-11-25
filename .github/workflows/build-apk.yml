@@ -143,6 +143,7 @@ jobs:
           import java.util.concurrent.Executors
 
           data class Channel(val id: String, val name: String, val group: String, val url: String, val custom: Boolean = false)
+          data class VideoOpt(val label: String, val grp: Tracks.Group?, val idx: Int, val cap: Int = Int.MAX_VALUE)
 
           @OptIn(UnstableApi::class)
           class MainActivity : AppCompatActivity() {
@@ -443,18 +444,17 @@ jobs:
               private fun showResolutionDialog() {
                   val exo = player ?: return
                   val ts = selector ?: return
-                  data class Opt(val label: String, val grp: Tracks.Group?, val idx: Int, val cap: Int = Int.MAX_VALUE)
                   val opts = mutableListOf(
-                      Opt("Tự động (ABR)", null, -1),
-                      Opt("Auto giới hạn <= 720p", null, -1, 720),
-                      Opt("Auto giới hạn <= 480p", null, -1, 480)
+                      VideoOpt("Tự động (ABR)", null, -1),
+                      VideoOpt("Auto giới hạn <= 720p", null, -1, 720),
+                      VideoOpt("Auto giới hạn <= 480p", null, -1, 480)
                   )
                   for (g in exo.currentTracks.groups) {
                       if (g.type == C.TRACK_TYPE_VIDEO) {
                           for (i in 0 until g.length) if (g.isTrackSupported(i)) {
                               val f = g.getTrackFormat(i)
                               val mbps = if (f.bitrate > 0) String.format("%.2f Mbps", f.bitrate / 1e6) else "ABR"
-                              opts.add(Opt("${f.height}p (${f.width}x${f.height} • $mbps)", g, i))
+                              opts.add(VideoOpt("${f.height}p (${f.width}x${f.height} • $mbps)", g, i))
                           }
                       }
                   }
